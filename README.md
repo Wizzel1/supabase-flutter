@@ -9,6 +9,10 @@ Flutter Client library for [Supabase](https://supabase.com/).
 
 - Documentation: https://supabase.com/docs/reference/dart/introduction
 
+## Platform Support
+
+Except Linux, all platforms are fully supported. Linux only doesn't support deeplinks, because of our dependency [app_links](https://pub.dev/packages/app_links). All other features are supported.
+
 ## Getting Started
 
 Import the package:
@@ -90,6 +94,23 @@ class _MyWidgetState extends State<MyWidget> {
   }
 }
 ```
+
+#### Native Sign in with Apple example
+
+Before you run the code, you need to [register your app ID with Apple](https://developer.apple.com/help/account/manage-identifiers/register-an-app-id/) with the `Sign In with Apple` capability selected, and add the bundle ID to your Supabase dashboard in `Authentication -> Providers -> Apple`. 
+
+```dart
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+final supabase = Supabase.instance.client;
+
+return supabase.auth.signInWithApple();
+```
+
+`signInWithApple()` is only supported on iOS and on macOS. Other platforms can use the `signInWithOAuth()` method to perform Apple login.
+
+The `signInWithApple` method is currently experimental and is subject to change. Follow [this issue](https://github.com/supabase/supabase-flutter/issues/399) for platform support progress.
+
 
 ### [Database](https://supabase.com/docs/guides/database)
 

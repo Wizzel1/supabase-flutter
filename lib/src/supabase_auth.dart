@@ -1,15 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io' show Platform;
+import 'dart:math';
 
 import 'package:app_links/app_links.dart';
-import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:meta/meta.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
-
-// ignore_for_file: invalid_null_aware_operator
+import 'package:url_launcher/url_launcher_string.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 /// SupabaseAuth
 class SupabaseAuth with WidgetsBindingObserver {
@@ -36,7 +40,8 @@ class SupabaseAuth with WidgetsBindingObserver {
   /// Can be used to determine whether a user is signed in upon initial
   /// app launch.
   Future<Session?> get initialSession => _initialSessionCompleter.future;
-  final Completer<Session?> _initialSessionCompleter = Completer();
+
+  late Completer<Session?> _initialSessionCompleter;
 
   /// **ATTENTION**: `getInitialLink`/`getInitialUri` should be handled
   /// ONLY ONCE in your app's lifetime, since it is not meant to change
@@ -73,11 +78,20 @@ class SupabaseAuth with WidgetsBindingObserver {
       _instance._initialized = true;
       _instance._localStorage = localStorage;
       _instance._authCallbackUrlHostname = authCallbackUrlHostname;
+      _instance._initialSessionCompleter = Completer();
+
+      _instance.initialSession.catchError((e, d) {
+        return null;
+      });
 
       _instance._authSubscription =
-          Supabase.instance.client.auth.onAuthStateChange.listen((data) {
-        _instance._onAuthStateChange(data.event, data.session);
-      });
+          Supabase.instance.client.auth.onAuthStateChange.listen(
+        (data) {
+          _instance._onAuthStateChange(data.event, data.session);
+        },
+      )..onError((error, stackTrace) {
+              Supabase.instance.log(error.toString(), stackTrace);
+            });
 
       await _instance._localStorage.initialize();
 
@@ -92,15 +106,17 @@ class SupabaseAuth with WidgetsBindingObserver {
             if (!_instance._initialSessionCompleter.isCompleted) {
               _instance._initialSessionCompleter.complete(response.session);
             }
-          } on AuthException catch (error) {
-            Supabase.instance.log(error.message);
+          } on AuthException catch (error, stackTrace) {
+            Supabase.instance.log(error.message, stackTrace);
             if (!_instance._initialSessionCompleter.isCompleted) {
-              _instance._initialSessionCompleter.completeError(error);
+              _instance._initialSessionCompleter
+                  .completeError(error, stackTrace);
             }
-          } catch (error) {
-            Supabase.instance.log(error.toString());
+          } catch (error, stackTrace) {
+            Supabase.instance.log(error.toString(), stackTrace);
             if (!_instance._initialSessionCompleter.isCompleted) {
-              _instance._initialSessionCompleter.completeError(error);
+              _instance._initialSessionCompleter
+                  .completeError(error, stackTrace);
             }
           }
         }
@@ -175,7 +191,7 @@ class SupabaseAuth with WidgetsBindingObserver {
 
   void _onAuthStateChange(AuthChangeEvent event, Session? session) {
     Supabase.instance.log('**** onAuthStateChange: $event');
-    if (event == AuthChangeEvent.signedIn && session != null) {
+    if (session != null) {
       Supabase.instance.log(session.persistSessionString);
       _localStorage.persistSession(session.persistSessionString);
     } else if (event == AuthChangeEvent.signedOut) {
@@ -219,8 +235,8 @@ class SupabaseAuth with WidgetsBindingObserver {
             _handleDeeplink(uri);
           }
         },
-        onError: (Object err) {
-          _onErrorReceivingDeeplink(err.toString());
+        onError: (Object err, StackTrace stackTrace) {
+          _onErrorReceivingDeeplink(err.toString(), stackTrace);
         },
       );
     }
@@ -242,13 +258,13 @@ class SupabaseAuth with WidgetsBindingObserver {
       if (uri != null) {
         await _handleDeeplink(uri);
       }
-    } on PlatformException catch (err) {
-      _onErrorReceivingDeeplink(err.message ?? err.toString());
+    } on PlatformException catch (err, stackTrace) {
+      _onErrorReceivingDeeplink(err.message ?? err.toString(), stackTrace);
       // Platform messages may fail but we ignore the exception
-    } on FormatException catch (err) {
-      _onErrorReceivingDeeplink(err.message);
-    } catch (err) {
-      _onErrorReceivingDeeplink(err.toString());
+    } on FormatException catch (err, stackTrace) {
+      _onErrorReceivingDeeplink(err.message, stackTrace);
+    } catch (err, stackTrace) {
+      _onErrorReceivingDeeplink(err.toString(), stackTrace);
     }
   }
 
@@ -268,27 +284,46 @@ class SupabaseAuth with WidgetsBindingObserver {
   Future<void> _recoverSessionFromUrl(Uri uri) async {
     try {
       await Supabase.instance.client.auth.getSessionFromUrl(uri);
-    } on AuthException catch (error) {
-      Supabase.instance.log(error.message);
-    } catch (error) {
-      Supabase.instance.log(error.toString());
+    } on AuthException catch (error, stackTrace) {
+      Supabase.instance.log(error.message, stackTrace);
+    } catch (error, stackTrace) {
+      Supabase.instance.log(error.toString(), stackTrace);
     }
   }
 
   /// Callback when deeplink receiving throw error
-  void _onErrorReceivingDeeplink(String message) {
-    Supabase.instance.log('onErrorReceivingDeepLink message: $message');
+  void _onErrorReceivingDeeplink(String message, StackTrace stackTrace) {
+    Supabase.instance
+        .log('onErrorReceivingDeepLink message: $message', stackTrace);
   }
 }
 
 extension GoTrueClientSignInProvider on GoTrueClient {
   /// Signs the user in using a third party providers.
   ///
+  /// ```dart
+  /// await supabase.auth.signInWithOAuth(
+  ///   Provider.google,
+  ///   // Use deep link to bring the user back to the app
+  ///   redirectTo: 'my-scheme://my-host/login-callback',
+  ///   // Pass the context and set `authScreenLaunchMode` to `platformDefault`
+  ///   // to open the OAuth screen in webview for iOS apps as recommended by Apple.
+  ///   // For other platforms it will launch the OAuth screen in whatever the platform default is.
+  ///   context: context,
+  ///   authScreenLaunchMode: LaunchMode.platformDefault
+  /// );
+  /// ```
+  ///
+  /// The return value of this method is not the auth result, and whether the
+  /// OAuth sign-in has succeded or not should be observed by setting a listener
+  /// on [auth.onAuthStateChanged].
+  ///
   /// See also:
   ///
   ///   * <https://supabase.io/docs/guides/auth#third-party-logins>
   Future<bool> signInWithOAuth(
     Provider provider, {
+    BuildContext? context,
     String? redirectTo,
     String? scopes,
     LaunchMode authScreenLaunchMode = LaunchMode.externalApplication,
@@ -300,12 +335,148 @@ extension GoTrueClientSignInProvider on GoTrueClient {
       scopes: scopes,
       queryParams: queryParams,
     );
-    final url = Uri.parse(res.url!);
-    final result = await launchUrl(
-      url,
-      mode: authScreenLaunchMode,
-      webOnlyWindowName: '_self',
+    final uri = Uri.parse(res.url!);
+
+    final willOpenWebview = (authScreenLaunchMode == LaunchMode.inAppWebView ||
+            authScreenLaunchMode == LaunchMode.platformDefault) &&
+        context != null &&
+        !kIsWeb && // `Platform.isIOS` throws on web, so adding a guard for web here.
+        Platform.isIOS;
+
+    if (willOpenWebview) {
+      Navigator.of(context).push(PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) {
+        return _OAuthSignInWebView(oAuthUri: uri, redirectTo: redirectTo);
+      }));
+      return true;
+    } else {
+      LaunchMode launchMode = authScreenLaunchMode;
+
+      // `Platform.isAndroid` throws on web, so adding a guard for web here.
+      final isAndroid = !kIsWeb && Platform.isAndroid;
+
+      if (provider == Provider.google && isAndroid) {
+        launchMode = LaunchMode.externalApplication;
+      }
+
+      final result = await launchUrl(
+        uri,
+        mode: launchMode,
+        webOnlyWindowName: '_self',
+      );
+      return result;
+    }
+  }
+
+  /// Signs a user in using native Apple Login.
+  ///
+  /// This method only works on iOS and MacOS. If you want to sign in a user using Apple
+  /// on other platforms, please use the `signInWithOAuth` method.
+  ///
+  /// This method is experimental as the underlying `signInWithIdToken` method is experimental.
+  @experimental
+  Future<AuthResponse> signInWithApple() async {
+    assert(!kIsWeb && (Platform.isIOS || Platform.isMacOS),
+        'Please use signInWithOAuth for non-iOS platforms');
+    final rawNonce = _generateRandomString();
+    final hashedNonce = sha256.convert(utf8.encode(rawNonce)).toString();
+
+    final credential = await SignInWithApple.getAppleIDCredential(
+      scopes: [
+        AppleIDAuthorizationScopes.email,
+        AppleIDAuthorizationScopes.fullName,
+      ],
+      nonce: hashedNonce,
     );
-    return result;
+
+    final idToken = credential.identityToken;
+    if (idToken == null) {
+      throw AuthException('Could not find ID Token from generated credential.');
+    }
+
+    return signInWithIdToken(
+      provider: Provider.apple,
+      idToken: idToken,
+      nonce: rawNonce,
+    );
+  }
+
+  String _generateRandomString() {
+    final random = Random.secure();
+    return base64Url.encode(List<int>.generate(16, (_) => random.nextInt(256)));
+  }
+}
+
+class _OAuthSignInWebView extends StatefulWidget {
+  const _OAuthSignInWebView({
+    Key? key,
+    required this.oAuthUri,
+    required this.redirectTo,
+  }) : super(key: key);
+
+  final Uri oAuthUri;
+  final String? redirectTo;
+
+  @override
+  State<_OAuthSignInWebView> createState() => _OAuthSignInWebViewState();
+}
+
+/// Modal bottom sheet with webview for OAuth sign in
+class _OAuthSignInWebViewState extends State<_OAuthSignInWebView> {
+  bool isLoading = true;
+
+  late final WebViewController _controller;
+
+  void _handleWebResourceError(WebResourceError error) {
+    if (Navigator.canPop(context)) {
+      Navigator.of(context).pop(false);
+    }
+  }
+
+  FutureOr<NavigationDecision> _handleNavigationRequest(
+    NavigationRequest request,
+  ) async {
+    if (widget.redirectTo != null &&
+        request.url.startsWith(widget.redirectTo!)) {
+      await launchUrlString(request.url);
+    }
+    return NavigationDecision.navigate;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setUserAgent('Supabase OAuth')
+      ..loadRequest(widget.oAuthUri)
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageStarted: (_) => setState(() => isLoading = true),
+        onPageFinished: (_) => setState(() => isLoading = false),
+        onWebResourceError: _handleWebResourceError,
+        onNavigationRequest: _handleNavigationRequest,
+      ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      child: SafeArea(
+        child: Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            // WebView
+            WebViewWidget(
+              controller: _controller,
+            ),
+            // Loader
+            if (isLoading)
+              const Center(
+                child: CircularProgressIndicator.adaptive(),
+              )
+          ],
+        ),
+      ),
+    );
   }
 }
